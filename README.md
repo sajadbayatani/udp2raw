@@ -1,233 +1,93 @@
-# Udp2raw-tunnel
+# udp2raw for Linux
 
+Forward local UDP datagrams to a remote UDP service over FakeTCP, UDP or ICMP.
+The Rust server opens all three listeners at startup. Each client uses one
+carrier at a time. The default order is `faketcp,udp,icmp`. Multiple clients
+can use different carriers on the same server at the same time.
 
-A Tunnel which turns UDP Traffic into Encrypted FakeTCP/UDP/ICMP Traffic by using Raw Socket, helps you Bypass UDP FireWalls(or Unstable UDP Environment).
+## Run a tunnel
 
-When used alone,udp2raw tunnels only UDP traffic. Nevertheless,if you used udp2raw + any UDP-based VPN together,you can tunnel any traffic(include TCP/UDP/ICMP),currently OpenVPN/L2TP/ShadowVPN and [tinyfecVPN](https://github.com/wangyu-/tinyfecVPN) are confirmed to be supported.
+Download the Linux binary matching your CPU and the checksum file from
+[Releases](https://github.com/sajadbayatani/udp2raw/releases).
+Run `sha256sum --ignore-missing -c SHA256SUMS` in the download directory, then
+rename the binary to `udp2raw` and run `chmod +x udp2raw`. Both endpoints must
+run the Rust version. Set `UDP2RAW_KEY` to the same high-entropy secret on
+both machines. You can generate one with `openssl rand -hex 32`.
 
+FakeTCP and ICMP require Linux raw socket access. Run the following once on
+both endpoints to give the installed binary the necessary capability.
 
-![image0](images/image0.PNG)
-
-or
-
-![image_vpn](images/udp2rawopenvpn.PNG)
-
-[udp2raw wiki](https://github.com/wangyu-/udp2raw-tunnel/wiki)
-
-[简体中文](/doc/README.zh-cn.md)
-
-
-# Support Platforms
-Linux host (including desktop Linux,Android phone/tablet,OpenWRT router,or Raspberry PI) with root account or cap_net_raw capability.
-
-For Windows and MacOS users, use the udp2raw in [this repo](https://github.com/wangyu-/udp2raw-multiplatform).
-
-# Features
-### Send/Receive UDP Packets with ICMP/FakeTCP/UDP headers
-ICMP/FakeTCP headers help you bypass UDP blocking, UDP QOS or improper UDP NAT behavior on some ISPs. In ICMP header mode,udp2raw works like an ICMP tunnel.
-
-UDP headers are also supported. In UDP header mode, it behaves just like a normal UDP tunnel, and you can just make use of the other features (such as encryption, anti-replay, or connection stabilization).
-
-### Simulated TCP with Real-time/Out-of-Order Delivery
-In FakeTCP header mode,udp2raw simulates 3-way handshake while establishing a connection,simulates seq and ack_seq while data transferring. It also simulates a few TCP options such as: `MSS`, `sackOk`, `TS`, `TS_ack`, `wscale`. Firewalls will regard FakeTCP as a TCP connection, but its essentially UDP: it supports real-time/out-of-order delivery(just as normal UDP does), no congestion control or re-transmission. So there wont be any TCP over TCP problem when using OpenVPN.
-
-### Encryption, Anti-Replay
-* Encrypt your traffic with AES-128-CBC.
-* Protect data integrity by HMAC-SHA1 (or weaker MD5/CRC32).
-* Defense replay attack with anti-replay window.
-
-[Notes on encryption](https://github.com/wangyu-/udp2raw-tunnel/wiki/Notes-on-encryption)
-
-### Failure Dectection & Stabilization (Connection Recovery)
-Conection failures are detected by heartbeats. If timed-out, client will automatically change port number and reconnect. If reconnection is successful, the previous connection will be recovered, and all existing UDP conversations will stay vaild.
-
-For example, if you use udp2raw + OpenVPN, OpenVPN won't lose connection after any reconnect, **even if network cable is re-plugged or WiFi access point is changed**.
-
-### Other Features
-* **Multiplexing** One client can handle multiple UDP connections, all of which share the same raw connection.
-
-* **Multiple Clients** One server can have multiple clients.
-
-* **NAT Support** All of the 3 modes work in NAT environments.
-
-* **OpenVZ Support** Tested on BandwagonHost VPS.
-
-* **Easy to Build** No dependencies.To cross-compile udp2raw,all you need to do is just to download a toolchain,modify makefile to point at the toolchain,run `make cross` then everything is done.(Note:Pre-compiled binaries for Desktop,RaspberryPi,Android,some Openwrt Routers are already included in [Releases](https://github.com/wangyu-/udp2raw-tunnel/releases))
-
-### Keywords
-`Bypass UDP QoS` `Bypass UDP Blocking` `Bypass OpenVPN TCP over TCP problem` `OpenVPN over ICMP` `UDP to ICMP tunnel` `UDP to TCP tunnel` `UDP over ICMP` `UDP over TCP`
-
-# Getting Started
-### Installing
-Download binary release from https://github.com/wangyu-/udp2raw-tunnel/releases
-
-### Running
-Assume your UDP is blocked or being QOS-ed or just poorly supported. Assume your server ip is 44.55.66.77, you have a service listening on udp port 7777.
-
-```bash
-# Run at server side:
-./udp2raw_amd64 -s -l0.0.0.0:4096 -r 127.0.0.1:7777    -k "passwd" --raw-mode faketcp -a
-
-# Run at client side
-./udp2raw_amd64 -c -l0.0.0.0:3333  -r44.55.66.77:4096  -k "passwd" --raw-mode faketcp -a
-```
-(The above commands need to be run as root. For better security, with some extra steps, you can run udp2raw as non-root. Check [this link](https://github.com/wangyu-/udp2raw-tunnel/wiki/run-udp2raw-as-non-root) for more info  )
-
-###### Server Output:
-![](images/output_server.PNG)
-###### Client Output:
-![](images/output_client.PNG)
-
-Now,an encrypted raw tunnel has been established between client and server through TCP port 4096. Connecting to UDP port 3333 at the client side is equivalent to connecting to port 7777 at the server side. No UDP traffic will be exposed.
-
-### Note
-To run on Android, check [Android_Guide](https://github.com/wangyu-/udp2raw/wiki/Android-Guide)
-
-`-a` option automatically adds an iptables rule (or a few iptables rules) for you, udp2raw relies on this iptables rule to work stably. Be aware you dont forget `-a` (its a common mistake). If you dont want udp2raw to add iptables rule automatically, you can add it manually(take a look at `-g` option) and omit `-a`.
-
-
-# Advanced Topic
-### Usage
-```
-udp2raw-tunnel
-git version:4623f878e0    build date:Nov  3 2024 23:15:46
-repository: https://github.com/wangyu-/udp2raw-tunnel
-
-usage:
-    run as client : ./this_program -c -l local_listen_ip:local_port -r server_address:server_port  [options]
-    run as server : ./this_program -s -l server_listen_ip:server_port -r remote_address:remote_port  [options]
-
-common options,these options must be same on both side:
-    --raw-mode            <string>        available values:faketcp(default),udp,icmp and easy-faketcp
-    -k,--key              <string>        password to gen symetric key,default:"secret key"
-    --cipher-mode         <string>        available values:aes128cfb,aes128cbc(default),xor,none
-    --auth-mode           <string>        available values:hmac_sha1,md5(default),crc32,simple,none
-    -a,--auto-rule                        auto add (and delete) iptables rule
-    -g,--gen-rule                         generate iptables rule then exit,so that you can copy and
-                                          add it manually.overrides -a
-    --disable-anti-replay                 disable anti-replay,not suggested
-    --fix-gro                             try to fix huge packet caused by GRO. this option is at an early stage.
-                                          make sure client and server are at same version.
-client options:
-    --source-ip           <ip>            force source-ip for raw socket
-    --source-port         <port>          force source-port for raw socket,tcp/udp only
-                                          this option disables port changing while re-connecting
-other options:
-    --conf-file           <string>        read options from a configuration file instead of command line.
-                                          check example.conf in repo for format
-    --fifo                <string>        use a fifo(named pipe) for sending commands to the running program,
-                                          check readme.md in repository for supported commands.
-    --log-level           <number>        0:never    1:fatal   2:error   3:warn
-                                          4:info (default)     5:debug   6:trace
-    --log-position                        enable file name,function name,line number in log
-    --disable-color                       disable log color
-    --disable-bpf                         disable the kernel space filter,most time its not necessary
-                                          unless you suspect there is a bug
-    --dev                 <string>        bind raw socket to a device, not necessary but improves performance
-    --sock-buf            <number>        buf size for socket,>=10 and <=10240,unit:kbyte,default:1024
-    --force-sock-buf                      bypass system limitation while setting sock-buf
-    --seq-mode            <number>        seq increase mode for faketcp:
-                                          0:static header,do not increase seq and ack_seq
-                                          1:increase seq for every packet,simply ack last seq
-                                          2:increase seq randomly, about every 3 packets,simply ack last seq
-                                          3:simulate an almost real seq/ack procedure(default)
-                                          4:similiar to 3,but do not consider TCP Option Window_Scale,
-                                          maybe useful when firewall doesnt support TCP Option
-    --lower-level         <string>        send packets at OSI level 2, format:'if_name#dest_mac_adress'
-                                          ie:'eth0#00:23:45:67:89:b9'.or try '--lower-level auto' to obtain
-                                          the parameter automatically,specify it manually if 'auto' failed
-    --wait-lock                           wait for xtables lock while invoking iptables, need iptables v1.4.20+
-    --gen-add                             generate iptables rule and add it permanently,then exit.overrides -g
-    --keep-rule                           monitor iptables and auto re-add if necessary.implys -a
-    --hb-len              <number>        length of heart-beat packet, >=0 and <=1500
-    --mtu-warn            <number>        mtu warning threshold, unit:byte, default:1375
-    --clear                               clear any iptables rules added by this program.overrides everything
-    --retry-on-error                      retry on error, allow to start udp2raw before network is initialized
-    -h,--help                             print this help message
+```sh
+sudo setcap cap_net_raw+ep ./udp2raw
 ```
 
-### Iptables rules,`-a` and `-g`
-This program sends packets via raw socket. In FakeTCP mode, Linux kernel TCP packet processing has to be blocked by a iptables rule on both sides, otherwise the kernel will automatically send RST for an unrecongized TCP packet and you will sustain from stability / peformance problems. You can use `-a` option to let the program automatically add / delete iptables rule on start / exit. You can also use the `-g` option to generate iptables rule and add it manually.
+For the examples below, allow inbound TCP and UDP port 4096 and ICMP echo
+requests on the server. Allow replies on the client. Suppress kernel-generated
+TCP resets for the tunnel on each endpoint. These rules apply to IPv4 and
+assume a dedicated tunnel port. Replace the example server address first.
 
-### `--cipher-mode` and `--auth-mode`
-It is suggested to use `aes128cbc` + `hmac_sha1` to obtain maximum security. If you want to run the program on a router, you can try `xor` + `simple`, which can fool packet inspection by firewalls the most of time, but it cannot protect you from serious attacks. Mode none is only for debugging purpose. It is not recommended to set the cipher-mode or auth-mode to none.
+```sh
+# Server
+sudo iptables -I OUTPUT -p tcp --sport 4096 --tcp-flags RST RST -j DROP
+./udp2raw -s -l 0.0.0.0:4096 -r 127.0.0.1:7777
 
-### `--seq-mode`
-The FakeTCP mode does not behave 100% like a real tcp connection. ISPs may be able to distinguish the simulated tcp traffic from the real TCP traffic (though it's costly). seq-mode can help you change the seq increase behavior slightly. If you experience connection problems, try to change the value.
-
-### `--lower-level`
-`--lower-level` allows you to send packet at OSI level 2(link level),so that you can bypass any local iptables rules. If you have a complicated iptables rules which conflicts with udp2raw and you cant(or too lazy to) edit the iptables rules,`--lower-level` can be very useful. Try `--lower-level auto` to auto detect the parameters,you can specify it manually if `auto` fails.
-
-Manual format `if_name#dest_mac_adress`,ie:`eth0#00:23:45:67:89:b9`.
-
-### `--keep-rule`
-Monitor iptables and auto re-add iptables rules(for blocking kernel tcp processing) if necessary.Especially useful when iptables rules may be cleared by other programs(for example,if you are using openwrt,everytime you changed and commited a setting,iptables rule may be cleared and re-constructed).
-
-### `--conf-file`
-
-You can also load options from a configuration file in order to keep secrets away from `ps` command.
-
-For example, rewrite the options for the above `server` example (in Getting Started section) into configuration file:
-
-`server.conf`
-
-```
--s
-# You can add comments like this
-# Comments MUST occupy an entire line
-# Or they will not work as expected
-# Listen address
--l 0.0.0.0:4096
-# Remote address
--r 127.0.0.1:7777
--a
--k passwd
---raw-mode faketcp
+# Client
+sudo iptables -I OUTPUT -d 192.0.2.1 -p tcp --dport 4096 --tcp-flags RST RST -j DROP
+./udp2raw -c -l 127.0.0.1:3333 -r 192.0.2.1:4096 --protocols faketcp,udp,icmp
 ```
 
-Pay attention to the `-k` parameter: In command line mode the quotes around the password will be removed by shell. In configuration files we do not remove quotes.
+Send application traffic to UDP port 3333 on the client. The server forwards
+it to UDP port 7777. Log lines such as `connected via icmp` identify the
+active carrier. Remove each firewall rule with the same command using `-D`
+in place of `-I`. For a UDP-only setup, use `--protocols udp` on both ends.
+That configuration works as an ordinary user without firewall changes.
 
-Then start the server with
+## Failover and packet handling
 
-```bash
-./udp2raw_amd64 --conf-file server.conf
+* The client sends an authenticated heartbeat every second. After five seconds
+  without a valid reply it tries the next carrier. A local socket error can
+  trigger an earlier switch. After the last carrier it starts from the first.
+  It stays on a working carrier until that carrier fails. Set
+  `--heartbeat-ms` and `--timeout-ms` on the client to change the timings.
+* The client keeps its local listener open during failover. The server keeps
+  the upstream UDP socket for each client flow across carrier changes. Idle
+  flows expire after five minutes. Applications may lose datagrams during a
+  switch. A server restart creates new upstream sockets.
+* FakeTCP uses a raw SYN/SYN-ACK exchange and carries datagrams in TCP
+  segments. ICMP uses echo requests and replies. For ICMP the configured
+  tunnel port identifies the tunnel inside the authenticated protocol. The
+  network must pass ICMP in both directions.
+* The multi-threaded Tokio runtime services carrier listeners and UDP sockets.
+  Frames use XChaCha20-Poly1305 with random 192-bit nonces and a key derived
+  with PBKDF2-HMAC-SHA256. Path challenges, attempt numbers and replay
+  windows reject stale traffic. Use independent secrets for different
+  trust groups.
+* The tunnel accepts inner datagrams up to 60,000 bytes. The usable datagram
+  size also depends on path MTU. On a 1500-byte IPv4 path, 1363 bytes of
+  application payload fit on all three carriers without fragmentation.
+
+## Build and test
+
+```sh
+cargo build --release --locked
+cargo test --locked
+target/release/udp2raw --help
 ```
 
-### `--fifo`
-Use a fifo(named pipe) for sending commands to the running program. For example `--fifo fifo.file`.
+The Linux integration test launches both endpoints and a UDP echo service.
+It blocks each carrier in turn and checks payloads and upstream source
+ports before and after failover. Run it inside an isolated network namespace
+or container with Python 3, iptables, CAP_NET_ADMIN and CAP_NET_RAW.
 
-At client side,you can use `echo reconnect >fifo.file` to force client to reconnect.Currently no command has been implemented for server.
-
-# Peformance Test
-#### Test method:
-iperf3 TCP via OpenVPN + udp2raw
-(iperf3 UDP mode is not used because of a bug mentioned in this issue: https://github.com/esnet/iperf/issues/296 . Instead, we package the TCP traffic into UDP by OpenVPN to test the performance. Read [Application](https://github.com/wangyu-/udp2raw-tunnel#application) for details.
-
-#### iperf3 command:
+```sh
+python3 tests/failover.py target/release/udp2raw
 ```
-iperf3 -c 10.222.2.1 -P40
-iperf3 -c 10.222.2.1 -P40 -R
-```
-#### Environments
-* **Client** Vultr $2.5/monthly plan (single core 2.4GHz cpu, 512MB RAM, Tokyo, Japan)
-* **Server** BandwagonHost $3.99/annually plan (single core 2.0GHz cpu, 128MB RAM, Los Angeles, USA)
 
-### Test1
-raw_mode: faketcp  cipher_mode: xor  auth_mode: simple
+## Migrating from C++
 
-![image4](images/image4.PNG)
-
-(reverse speed was simliar and not uploaded)
-
-### Test2
-raw_mode: faketcp  cipher_mode: aes128cbc  auth_mode: md5
-
-![image5](images/image5.PNG)
-
-(reverse speed was simliar and not uploaded)
-
-# wiki
-
-Check wiki for more info:
-
-https://github.com/wangyu-/udp2raw-tunnel/wiki
+This release uses a new wire format and IPv4 endpoints. Upgrade the client
+and server together. The Rust CLI supports the options shown by `--help`.
+Legacy cipher modes, easy-faketcp, automatic firewall management and legacy
+configuration files are available through the original C++ implementation.
+Its sources, makefile and [original guide](README.legacy.md) are included
+for existing deployments.
