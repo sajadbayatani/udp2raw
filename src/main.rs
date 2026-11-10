@@ -1,30 +1,63 @@
 mod client;
 mod config;
+mod firewall;
+mod legacy;
+mod link;
+mod logging;
+mod ops;
+mod packet;
 mod path;
 mod server;
+#[cfg(all(target_os = "linux", not(feature = "pcap-client")))]
+mod transport;
+#[cfg(any(not(target_os = "linux"), feature = "pcap-client"))]
+#[path = "portable.rs"]
 mod transport;
 mod wire;
 
+use std::{io, process::ExitCode, time::Duration};
+
+async fn run(c: &config::Config) -> io::Result<()> {
+    let Some(_services) = ops::start(c).await? else {
+        return Ok(());
+    };
+    loop {
+        let codec = wire::Codec::new(c);
+        let result = if c.server {
+            server::run(c, codec).await
+        } else {
+            client::run(c, codec).await
+        };
+        match result {
+            Err(e) if c.retry_on_error => {
+                crate::log!(3, "network unavailable: {e}; retrying");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            result => return result,
+        }
+    }
+}
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
-async fn main() -> std::process::ExitCode {
+async fn main() -> ExitCode {
     let c = match config::Config::parse() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("{e}\n{}", config::HELP);
-            return std::process::ExitCode::from(2);
+            return ExitCode::from(2);
         }
     };
-    let codec = wire::Codec::new(&c.key, c.server);
-    let result = if c.server {
-        server::run(&c, codec).await
-    } else {
-        client::run(&c, codec).await
+    logging::init(&c);
+    let result = tokio::select! {
+        biased;
+        _ = ops::shutdown() => Ok(()),
+        result = run(&c) => result,
     };
     match result {
-        Ok(()) => std::process::ExitCode::SUCCESS,
+        Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("udp2raw: {e}");
-            std::process::ExitCode::FAILURE
+            crate::log!(1, "udp2raw: {e}");
+            ExitCode::FAILURE
         }
     }
 }

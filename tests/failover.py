@@ -1,15 +1,16 @@
 """Linux end-to-end test. Run in an isolated network namespace with NET_ADMIN and NET_RAW."""
+import argparse
 import contextlib
 import os
 import queue
 import secrets
 import socket
 import subprocess
-import sys
 import threading
 import time
 
-BINARY = sys.argv[1] if len(sys.argv) == 2 else "target/release/udp2raw"
+BINARY = "target/release/udp2raw"
+WIRE_ARGS = []
 KEY = secrets.token_hex(32)
 SERVER = "127.0.0.2:34096"
 
@@ -32,7 +33,7 @@ class Tunnel:
     def __init__(self, stack, *args, key=KEY):
         self.log = queue.Queue()
         self.proc = subprocess.Popen(
-            [BINARY, *args], stderr=subprocess.PIPE, text=True,
+            [BINARY, *WIRE_ARGS, *args], stderr=subprocess.PIPE, text=True,
             env={**os.environ, "UDP2RAW_KEY": key},
         )
         stack.callback(self.stop)
@@ -84,7 +85,7 @@ def main():
         upstream = stack.enter_context(udp())
         threading.Thread(target=echo, args=(upstream,), daemon=True).start()
         server = Tunnel(stack, "-s", "-l", SERVER, "-r",
-                        f"127.0.0.1:{upstream.getsockname()[1]}")
+                        f"127.0.0.1:{upstream.getsockname()[1]}", "--heartbeat-ms", "100")
         server.expect("via icmp")
         stack.enter_context(blocked("-p", "tcp", "--tcp-flags", "RST", "RST",
                                     "--sport", "34096", chain="OUTPUT"))
@@ -140,4 +141,11 @@ def main():
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("binary", nargs="?", default=BINARY)
+    parser.add_argument("--legacy", action="store_true")
+    args = parser.parse_args()
+    BINARY = args.binary
+    if args.legacy:
+        WIRE_ARGS = ["--wire", "legacy", "--auth-mode", "hmac_sha1", "--fix-gro"]
     main()

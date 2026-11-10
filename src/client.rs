@@ -1,16 +1,11 @@
 use crate::{
     config::{Config, Mode},
+    legacy::{self, Link, Packet, Payload},
     path::Path,
     transport::{Carrier, Incoming, Segment},
     wire::{random, Codec, Kind, SessionId, MAX_DATA},
 };
-use std::{
-    collections::HashMap,
-    io,
-    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashMap, io, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{
     net::UdpSocket,
     sync::mpsc,
@@ -24,7 +19,7 @@ pub const IDLE: Duration = Duration::from_secs(300);
 struct Flows {
     by_addr: HashMap<SocketAddr, u64>,
     by_id: HashMap<u64, (SocketAddr, Instant)>,
-    next: u64,
+    next: u32,
 }
 impl Flows {
     fn id(&mut self, addr: SocketAddr) -> Option<u64> {
@@ -34,9 +29,17 @@ impl Flows {
             if self.by_addr.len() >= MAX_FLOWS {
                 return None;
             }
-            self.next += 1;
-            self.by_addr.insert(addr, self.next);
-            self.next
+            // Use the common range of both protocols throughout failover. At
+            // wraparound, long-lived conversations may still occupy low IDs.
+            let id = loop {
+                self.next = self.next.wrapping_add(1);
+                let candidate = u64::from(self.next);
+                if candidate != 0 && !self.by_id.contains_key(&candidate) {
+                    break candidate;
+                }
+            };
+            self.by_addr.insert(addr, id);
+            id
         };
         self.by_id.insert(id, (addr, Instant::now()));
         Some(id)
@@ -54,25 +57,44 @@ impl Flows {
 
 struct Local {
     socket: Arc<UdpSocket>,
+    reader: tokio::task::JoinHandle<()>,
     packets: mpsc::Receiver<(SocketAddr, Vec<u8>)>,
     flows: Flows,
 }
 
+impl Drop for Local {
+    fn drop(&mut self) {
+        self.reader.abort();
+    }
+}
+
 impl Local {
-    async fn bind(addr: SocketAddrV4) -> io::Result<Self> {
+    async fn deliver(&mut self, flow: u64, data: &[u8]) {
+        if let Some((addr, last)) = self.flows.by_id.get_mut(&flow) {
+            *last = Instant::now();
+            let _ = self.socket.send_to(data, *addr).await;
+        }
+    }
+    async fn bind(addr: SocketAddr, mtu_warn: usize) -> io::Result<Self> {
         let socket = Arc::new(UdpSocket::bind(addr).await?);
         let reader = socket.clone();
         let (tx, packets) = mpsc::channel(256);
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             let mut buffer = vec![0; 65535];
             loop {
                 let (len, source) = match reader.recv_from(&mut buffer).await {
                     Ok(packet) => packet,
                     Err(e) => {
-                        eprintln!("local UDP receive failed: {e}");
+                        crate::log!(2, "local UDP receive failed: {e}");
                         break;
                     }
                 };
+                if len >= mtu_warn {
+                    crate::log!(
+                        3,
+                        "UDP datagram of {len} bytes reaches MTU warning threshold {mtu_warn}"
+                    );
+                }
                 if len <= MAX_DATA && tx.send((source, buffer[..len].to_vec())).await.is_err() {
                     break;
                 }
@@ -80,6 +102,7 @@ impl Local {
         });
         Ok(Self {
             socket,
+            reader: task,
             packets,
             flows: Flows::default(),
         })
@@ -87,18 +110,22 @@ impl Local {
 }
 
 pub async fn run(c: &Config, codec: Codec) -> io::Result<()> {
-    let mut local = Local::bind(c.local).await?;
-    let session = random();
+    let mut local = Local::bind(c.local, c.mtu_warn).await?;
+    let session = if c.legacy {
+        legacy::session_id(legacy::id())
+    } else {
+        random()
+    };
     for (index, mode) in c.modes.iter().cycle().enumerate() {
         if local.packets.is_closed() {
             return Err(io::Error::other("local UDP reader stopped"));
         }
         let epoch = index as u64 + 1;
-        eprintln!("trying {mode} (attempt {epoch})");
+        crate::log!(4, "trying {mode} (attempt {epoch})");
         match attempt(c, &codec, &mut local, session, epoch, *mode).await {
-            Ok(()) => eprintln!("{mode} timed out"),
+            Ok(()) => crate::log!(3, "{mode} timed out"),
             Err(e) => {
-                eprintln!("{mode} unavailable: {e}");
+                crate::log!(3, "{mode} unavailable: {e}");
                 time::sleep(c.beat).await;
             }
         }
@@ -114,15 +141,19 @@ async fn attempt(
     epoch: u64,
     mode: Mode,
 ) -> io::Result<()> {
-    let carrier = Carrier::bind(mode, SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0), false).await?;
+    let carrier = Carrier::bind(mode, c).await?;
     let route = carrier.client_route(c.remote).await?;
     let mut path = Path::new(carrier.clone(), route, session, epoch, c.remote.port());
+    if c.legacy {
+        path.legacy = Some(Link::new(legacy::id(), 0));
+    }
     let mut tcp_ready = mode != Mode::FakeTcp;
     let mut welcomed = false;
     let mut ping = 0;
     let mut last_pong = 0;
     let mut next_cleanup = Instant::now();
     let mut deadline = Instant::now() + c.timeout;
+    let mut uplink_deadline = deadline;
     let mut timer = time::interval(c.beat);
     timer.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
     let mut raw = vec![0; 65535];
@@ -133,7 +164,8 @@ async fn attempt(
     }
     loop {
         let event = tokio::select! {
-            _ = time::sleep_until(deadline) => return Ok(()),
+            _ = crate::ops::reconnect() => {crate::log!(4,"reconnecting on FIFO request");return Ok(());},
+            _ = time::sleep_until(if c.legacy { deadline.min(uplink_deadline) } else { deadline }) => return Ok(()),
             _ = timer.tick() => Event::Tick,
             received = carrier.recv(&mut raw) => match received? {
                 Some(packet) => Event::Network(packet),
@@ -150,6 +182,7 @@ async fn attempt(
                     local.flows.expire();
                     next_cleanup = Instant::now() + Duration::from_secs(10);
                 }
+                crate::log!(6, "{mode} heartbeat tick (ready={})", path.ready);
                 if !tcp_ready {
                     carrier.send(&mut path.route, Segment::Syn, &[]).await?;
                 } else if !welcomed {
@@ -176,39 +209,91 @@ async fn attempt(
                     }
                     continue;
                 }
-                let Some(f) = codec.open(&rx.body, mode, c.remote.port()) else {
-                    continue;
-                };
-                if f.session != session
-                    || f.epoch != epoch
-                    || (welcomed && f.cookie != path.cookie)
-                    || !path.window.accept(f.serial)
-                {
+                if let (Some(io), Some(link)) = (codec.legacy(), &mut path.legacy) {
+                    for packet in io.read(&rx.body) {
+                        match packet {
+                            Packet::Handshake {
+                                sender, receiver, ..
+                            } if receiver == link.local
+                                && (!welcomed || sender == link.peer)
+                                && !path.ready =>
+                            {
+                                path.route.observe(&rx.route);
+                                crate::log!(5, "received legacy handshake challenge via {mode}");
+                                link.peer = sender;
+                                welcomed = true;
+                                link.send_handshake(
+                                    io,
+                                    &carrier,
+                                    &mut path.route,
+                                    sender,
+                                    legacy::word(&session),
+                                )
+                                .await?;
+                            }
+                            Packet::Safer {
+                                sender,
+                                receiver,
+                                sequence,
+                                roller,
+                                body,
+                            } if welcomed => {
+                                let previous = link.peer_roller;
+                                if !link.accept(io, sender, receiver, sequence, roller, &body) {
+                                    continue;
+                                }
+                                path.route.observe(&rx.route);
+                                if !path.ready {
+                                    path.ready = true;
+                                    crate::log!(4, "connected via {mode}");
+                                }
+                                if previous != Some(roller) {
+                                    uplink_deadline = Instant::now() + c.timeout;
+                                }
+                                if c.hb_mode == 0 || matches!(body, Payload::Heartbeat) {
+                                    deadline = Instant::now() + c.timeout;
+                                }
+                                if let Payload::Data(flow, data) = body {
+                                    local.deliver(u64::from(flow), &data).await;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                     continue;
                 }
-                path.route.observe(&rx.route);
-                match f.kind {
-                    Kind::Welcome if !welcomed => {
-                        path.cookie = f.cookie;
-                        welcomed = true;
-                        ping += 1;
-                        path.send(codec, Kind::Ping, ping, vec![]).await?;
+                for f in codec.frames(&rx.body, mode, c.remote.port()) {
+                    if f.session != session
+                        || f.epoch != epoch
+                        || (welcomed && f.cookie != path.cookie)
+                        || (codec.replay && !path.window.accept(f.serial))
+                    {
+                        continue;
                     }
-                    Kind::Pong if welcomed && f.flow > last_pong && f.flow <= ping => {
-                        last_pong = f.flow;
-                        deadline = Instant::now() + c.timeout;
-                        if !path.ready {
-                            path.ready = true;
-                            eprintln!("connected via {mode}");
+                    path.route.observe(&rx.route);
+                    match f.kind {
+                        Kind::Welcome if !welcomed => {
+                            path.cookie = f.cookie;
+                            welcomed = true;
+                            ping += 1;
+                            path.send(codec, Kind::Ping, ping, vec![]).await?;
                         }
-                    }
-                    Kind::Data if path.ready => {
-                        if let Some((addr, last)) = local.flows.by_id.get_mut(&f.flow) {
-                            *last = Instant::now();
-                            let _ = local.socket.send_to(&f.data, *addr).await;
+                        Kind::Pong if welcomed && f.flow > last_pong && f.flow <= ping => {
+                            last_pong = f.flow;
+                            deadline = Instant::now() + c.timeout;
+                            if !path.ready {
+                                path.ready = true;
+                                crate::log!(4, "connected via {mode}");
+                            }
                         }
+                        Kind::Data if path.ready => {
+                            if c.hb_mode == 0 {
+                                deadline = Instant::now() + c.timeout;
+                            }
+                            local.deliver(f.flow, &f.data).await;
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
             Event::Local(addr, data) if path.ready => {
@@ -224,5 +309,17 @@ async fn attempt(
             }
             Event::Local(_, _) => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn conversations_wrap_without_reusing_an_active_id() {
+        let mut flows = Flows::default();
+        assert_eq!(flows.id("127.0.0.1:7".parse().unwrap()), Some(1));
+        flows.next = u32::MAX;
+        assert_eq!(flows.id("127.0.0.1:8".parse().unwrap()), Some(2));
     }
 }

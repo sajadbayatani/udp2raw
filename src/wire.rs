@@ -1,4 +1,7 @@
-use crate::config::Mode;
+use crate::{
+    config::{Config, Mode},
+    legacy::Interop,
+};
 use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},
     XChaCha20Poly1305, XNonce,
@@ -35,31 +38,61 @@ pub struct Frame {
     pub data: Vec<u8>,
 }
 
+enum Suite {
+    Modern(XChaCha20Poly1305),
+    Legacy(Box<Interop>),
+}
+
 pub struct Codec {
-    cipher: XChaCha20Poly1305,
+    suite: Suite,
+    pub replay: bool,
+    pub heartbeat_len: usize,
+    gro: bool,
     server: bool,
 }
 impl Codec {
-    pub fn new(key: &str, server: bool) -> Self {
-        let mut derived = [0; 32];
-        pbkdf2::pbkdf2_hmac::<sha2::Sha256>(
-            key.as_bytes(),
-            b"udp2raw-rust-v1 shared key",
-            210_000,
-            &mut derived,
-        );
+    pub fn new(c: &Config) -> Self {
+        let suite = if c.legacy {
+            Suite::Legacy(Box::new(Interop::new(c)))
+        } else {
+            let mut derived = [0; 32];
+            pbkdf2::pbkdf2_hmac::<sha2::Sha256>(
+                c.key.as_bytes(),
+                b"udp2raw-rust-v1 shared key",
+                210_000,
+                &mut derived,
+            );
+            Suite::Modern(XChaCha20Poly1305::new((&derived).into()))
+        };
         Self {
-            cipher: XChaCha20Poly1305::new((&derived).into()),
-            server,
+            suite,
+            server: c.server,
+            replay: !c.disable_anti_replay,
+            heartbeat_len: if c.hb_mode == 1 { c.hb_len } else { 0 },
+            gro: c.fix_gro,
+        }
+    }
+    pub fn legacy(&self) -> Option<&Interop> {
+        match &self.suite {
+            Suite::Legacy(s) => Some(s),
+            Suite::Modern(_) => None,
         }
     }
     // Bind direction and carrier to every authenticated frame. Kernel ICMP
     // echo replies and frames copied between different carriers cannot pass.
     fn aad(server: bool, mode: Mode, port: u16) -> [u8; 8] {
         let [hi, lo] = if mode == Mode::Icmp { port } else { 0 }.to_be_bytes();
+        let mode = if mode == Mode::EasyFakeTcp {
+            Mode::FakeTcp
+        } else {
+            mode
+        };
         [b'U', b'2', b'R', 1, server as u8, mode as u8, hi, lo]
     }
     pub fn seal(&self, f: &Frame, mode: Mode, port: u16) -> io::Result<Vec<u8>> {
+        let Suite::Modern(cipher) = &self.suite else {
+            return Err(io::Error::other("modern encoder used on legacy path"));
+        };
         let mut plain = Vec::with_capacity(57 + f.data.len());
         plain.push(f.kind as u8);
         plain.extend(f.session);
@@ -71,7 +104,7 @@ impl Codec {
         let nonce = random::<24>();
         let mut packet = Vec::from(nonce);
         packet.extend(
-            self.cipher
+            cipher
                 .encrypt(
                     XNonce::from_slice(&nonce),
                     Payload {
@@ -81,14 +114,39 @@ impl Codec {
                 )
                 .map_err(|_| io::Error::other("encryption failed"))?,
         );
-        Ok(packet)
+        if self.gro {
+            let mut framed = (packet.len() as u16).to_be_bytes().to_vec();
+            framed.extend(packet);
+            Ok(framed)
+        } else {
+            Ok(packet)
+        }
+    }
+    pub fn frames(&self, mut packet: &[u8], mode: Mode, port: u16) -> Vec<Frame> {
+        if !self.gro {
+            return self.open(packet, mode, port).into_iter().collect();
+        }
+        let mut frames = Vec::new();
+        while packet.len() >= 2 {
+            let len = usize::from(u16::from_be_bytes([packet[0], packet[1]]));
+            let Some(frame) = packet.get(2..2 + len) else {
+                break;
+            };
+            if let Some(f) = self.open(frame, mode, port) {
+                frames.push(f);
+            }
+            packet = &packet[2 + len..];
+        }
+        frames
     }
     pub fn open(&self, packet: &[u8], mode: Mode, port: u16) -> Option<Frame> {
         if !(97..=97 + MAX_DATA).contains(&packet.len()) {
             return None;
         }
-        let p = self
-            .cipher
+        let Suite::Modern(cipher) = &self.suite else {
+            return None;
+        };
+        let p = cipher
             .decrypt(
                 XNonce::from_slice(&packet[..24]),
                 Payload {
@@ -105,7 +163,9 @@ impl Codec {
             5 => Kind::Data,
             _ => return None,
         };
-        if kind != Kind::Data && p.len() != 57 {
+        if (matches!(kind, Kind::Hello | Kind::Welcome) && p.len() != 57)
+            || (matches!(kind, Kind::Ping | Kind::Pong) && p.len() > 57 + 1500)
+        {
             return None;
         }
         Some(Frame {
@@ -165,11 +225,17 @@ mod tests {
     #[test]
     fn envelope_authenticates_direction_mode_port_and_bytes() {
         let client = Codec {
-            cipher: XChaCha20Poly1305::new((&[1; 32]).into()),
+            suite: Suite::Modern(XChaCha20Poly1305::new((&[1; 32]).into())),
+            replay: true,
+            heartbeat_len: 0,
+            gro: false,
             server: false,
         };
         let server = Codec {
-            cipher: client.cipher.clone(),
+            suite: Suite::Modern(XChaCha20Poly1305::new((&[1; 32]).into())),
+            replay: true,
+            heartbeat_len: 0,
+            gro: false,
             server: true,
         };
         let f = Frame {
