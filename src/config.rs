@@ -54,6 +54,7 @@ pub const HELP: &str = "udp2raw — multithreaded Rust UDP tunnel
   -r, --remote IP:PORT           Tunnel peer or server-side UDP destination
   -k, --key KEY                  Shared secret; alternatively set UDP2RAW_KEY
   --conf-file PATH               Read one option and optional value per line
+  --threads N                    Worker threads per process (1..256, default 4)
   --dns-resolve                  Resolve hostnames in endpoint arguments
   --protocols LIST               Client priority or server listener list
                                  Default: faketcp,udp,icmp
@@ -111,6 +112,7 @@ pub enum FirewallAction {
 
 pub struct Config {
     pub server: bool,
+    pub threads: usize,
     pub local: SocketAddr,
     pub remote: SocketAddr,
     pub key: String,
@@ -206,6 +208,7 @@ impl Config {
         let unset = SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0));
         let mut c = Self {
             server: false,
+            threads: 4,
             local: unset,
             remote: unset,
             key: key.unwrap_or_default(),
@@ -292,6 +295,7 @@ impl Config {
                 "--local" => local = Some(value()?),
                 "--remote" => remote = Some(value()?),
                 "--key" => c.key = value()?,
+                "--threads" => c.threads = range(&value()?, opt, 1, 256)?,
                 "--protocols" | "--raw-mode" => {
                     c.modes.clear();
                     for item in value()?.split(',') {
@@ -525,11 +529,12 @@ mod tests {
         let file = path.to_str().unwrap();
         fs::write(
             &path,
-            "# client\n  -c\n-l 127.0.0.1:9998\n-r 127.0.0.1:9999\n\n-k  \"a key\" # literal \t\n",
+            "# client\n  -c\n-l 127.0.0.1:9998\n-r 127.0.0.1:9999\n--threads 8\n\n-k  \"a key\" # literal \t\n",
         )
         .unwrap();
         let c = parse(&["--conf-file", file]).unwrap();
         assert_eq!(c.key, "\"a key\" # literal");
+        assert_eq!(c.threads, 8);
         assert!(parse(&["--key", "extra", "--conf-file", file]).is_err());
         fs::write(&path, format!("--conf-file {file}\n")).unwrap();
         assert!(parse(&["--conf-file", file]).is_err());

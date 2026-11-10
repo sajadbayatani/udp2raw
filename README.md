@@ -37,6 +37,18 @@ a valid reply. Local errors may trigger an earlier switch. After the last
 carrier the client retries the first. It stays on a healthy carrier.
 Datagrams in flight may be lost. Idle flows expire after five minutes.
 
+Set `--threads N` on either endpoint to choose how many OS worker threads
+run tunnel tasks. Each process defaults to 4 and accepts 1 through 256.
+For example, add `--threads 8` to the server command and `--threads 2` to
+the client command. The same option works in a config file. Restart the
+process to apply a new count.
+
+Independent tasks can run in parallel when the OS schedules their threads
+on different logical CPUs. To keep all threads on one logical CPU on Linux,
+prefix the command with `taskset -c 0` (choose a CPU allowed for the process).
+The workers then share that CPU's execution time. The main thread and any
+helper threads are additional to the configured worker count.
+
 For a UDP-only tunnel use `--raw-mode udp` on both ends. The modern Linux UDP
 backend can run as a regular user. Legacy UDP constructs its own UDP headers
 and checksums and requires raw socket access. For IPv6 use bracketed endpoints such as

@@ -2,6 +2,7 @@
 import argparse
 import contextlib
 import os
+from pathlib import Path
 import queue
 import secrets
 import socket
@@ -60,6 +61,16 @@ class Tunnel:
                 return
         raise AssertionError(f"missing log {message!r}, exit={self.proc.poll()}")
 
+    def expect_workers(self, count):
+        tasks = Path(f"/proc/{self.proc.pid}/task")
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            workers = [p for p in tasks.glob("*/comm") if p.read_text().strip() == "udp2raw-io"]
+            if len(workers) == count:
+                return
+            time.sleep(0.02)
+        raise AssertionError(f"expected {count} runtime workers, found {len(workers)}")
+
 
 def udp():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -85,8 +96,10 @@ def main():
         upstream = stack.enter_context(udp())
         threading.Thread(target=echo, args=(upstream,), daemon=True).start()
         server = Tunnel(stack, "-s", "-l", SERVER, "-r",
-                        f"127.0.0.1:{upstream.getsockname()[1]}", "--heartbeat-ms", "100")
+                        f"127.0.0.1:{upstream.getsockname()[1]}", "--heartbeat-ms", "100",
+                        "--threads", "8")
         server.expect("via icmp")
+        server.expect_workers(8)
         stack.enter_context(blocked("-p", "tcp", "--tcp-flags", "RST", "RST",
                                     "--sport", "34096", chain="OUTPUT"))
         stack.enter_context(blocked("-p", "tcp", "--tcp-flags", "RST", "RST",
@@ -96,8 +109,9 @@ def main():
             return Tunnel(stack, "-c", "-l", f"127.0.0.1:{port}", "-r", SERVER,
                           "--heartbeat-ms", "100", "--timeout-ms", "600", *extra, key=key)
 
-        primary = client(dest[1])
+        primary = client(dest[1], "--threads", "1")
         primary.expect("connected via faketcp")
+        primary.expect_workers(1)
         a, b = stack.enter_context(udp()), stack.enter_context(udp())
         for sock in (a, b):
             sock.settimeout(2)
@@ -109,6 +123,7 @@ def main():
         for port, mode in [(33334, "udp"), (33335, "icmp")]:
             other = client(port, "--protocols", mode)
             other.expect(f"connected via {mode}")
+            other.expect_workers(4)
             assert roundtrip(a, ("127.0.0.1", port), mode.encode()) != first
 
         wrong = client(33336, "--protocols", "udp", key="wrong")

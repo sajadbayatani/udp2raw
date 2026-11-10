@@ -38,8 +38,24 @@ async fn run(c: &config::Config) -> io::Result<()> {
     }
 }
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
-async fn main() -> ExitCode {
+fn start(c: config::Config) -> io::Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(c.threads)
+        .thread_name("udp2raw-io")
+        .enable_all()
+        .build()?;
+    crate::log!(5, "started runtime with {} worker threads", c.threads);
+    let tunnel = runtime.spawn(async move {
+        tokio::select! {
+            biased;
+            _ = ops::shutdown() => Ok(()),
+            result = run(&c) => result,
+        }
+    });
+    runtime.block_on(tunnel)?
+}
+
+fn main() -> ExitCode {
     let c = match config::Config::parse() {
         Ok(c) => c,
         Err(e) => {
@@ -48,12 +64,7 @@ async fn main() -> ExitCode {
         }
     };
     logging::init(&c);
-    let result = tokio::select! {
-        biased;
-        _ = ops::shutdown() => Ok(()),
-        result = run(&c) => result,
-    };
-    match result {
+    match start(c) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             crate::log!(1, "udp2raw: {e}");
