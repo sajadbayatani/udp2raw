@@ -79,8 +79,9 @@ impl Local {
             let _ = self.socket.send_to(data, *addr).await;
         }
     }
-    async fn bind(addr: SocketAddr, mtu: usize, mtu_warn: usize) -> io::Result<Self> {
-        let socket = Arc::new(UdpSocket::bind(addr).await?);
+    async fn bind(c: &Config) -> io::Result<Self> {
+        let socket = Arc::new(UdpSocket::bind(c.local).await?);
+        let (mtu, mtu_warn, fragment_size) = (c.mtu, c.mtu_warn, c.fragment_size);
         let reader = socket.clone();
         let (tx, packets) = mpsc::channel(256);
         let task = tokio::spawn(async move {
@@ -96,7 +97,7 @@ impl Local {
                 if !payload_fits(len, mtu) {
                     continue;
                 }
-                if len >= mtu_warn {
+                if len >= mtu_warn && fragment_size.is_none_or(|width| len <= width) {
                     crate::log!(
                         3,
                         "UDP datagram of {len} bytes reaches MTU warning threshold {mtu_warn}"
@@ -118,7 +119,7 @@ impl Local {
 }
 
 pub async fn run(c: &Config, codec: Codec) -> io::Result<()> {
-    let mut local = Local::bind(c.local, c.mtu, c.mtu_warn).await?;
+    let mut local = Local::bind(c).await?;
     let session = if c.legacy {
         legacy::session_id(legacy::id())
     } else {
@@ -159,6 +160,7 @@ async fn attempt(
     let mut welcomed = false;
     let mut ping = 0;
     let mut last_pong = 0;
+    let mut fragments = crate::fragment::Reassembly::default();
     let mut next_cleanup = Instant::now();
     let mut deadline = Instant::now() + c.timeout;
     let mut uplink_deadline = deadline;
@@ -188,6 +190,7 @@ async fn attempt(
             Event::Tick => {
                 if Instant::now() >= next_cleanup {
                     local.flows.expire();
+                    fragments.expire();
                     next_cleanup = Instant::now() + Duration::from_secs(10);
                 }
                 crate::log!(6, "{mode} heartbeat tick (ready={})", path.ready);
@@ -294,11 +297,15 @@ async fn attempt(
                                 crate::log!(4, "connected via {mode}");
                             }
                         }
-                        Kind::Data if path.ready => {
+                        Kind::Data | Kind::Fragment if path.ready => {
+                            let flow = f.flow;
+                            let Some(data) = fragments.payload(f, c.mtu) else {
+                                continue;
+                            };
                             if c.hb_mode == 0 {
                                 deadline = Instant::now() + c.timeout;
                             }
-                            local.deliver(f.flow, &f.data).await;
+                            local.deliver(flow, &data).await;
                         }
                         _ => {}
                     }

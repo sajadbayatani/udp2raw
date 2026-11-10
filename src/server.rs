@@ -110,6 +110,7 @@ impl LegacyPeers {
 }
 
 struct Server {
+    fragments: crate::fragment::Reassembly,
     sessions: HashMap<SessionId, Session>,
     flows: HashMap<FlowKey, Flow>,
     tx: mpsc::Sender<Event>,
@@ -309,8 +310,12 @@ impl Server {
                 p.ready = true;
                 p.send(&self.codec, Kind::Pong, f.flow, vec![]).await
             }
-            Kind::Data if p.ready && f.flow != 0 => {
-                self.forward((f.session, f.flow), &f.data).await
+            Kind::Data | Kind::Fragment if p.ready && f.flow != 0 => {
+                let key = (f.session, f.flow);
+                let Some(data) = self.fragments.payload(f, self.mtu) else {
+                    return Ok(());
+                };
+                self.forward(key, &data).await
             }
             _ => Ok(()),
         }
@@ -373,7 +378,12 @@ impl Server {
             return Ok(());
         };
         flow.last_seen = Instant::now();
-        if data.len() >= self.mtu_warn {
+        if data.len() >= self.mtu_warn
+            && self
+                .codec
+                .fragment_size
+                .is_none_or(|width| data.len() <= width)
+        {
             crate::log!(
                 3,
                 "upstream UDP datagram of {} bytes reaches MTU warning threshold {}",
@@ -387,6 +397,7 @@ impl Server {
         Ok(())
     }
     fn expire(&mut self) {
+        self.fragments.expire();
         self.sessions.retain(|_, s| s.last_seen.elapsed() < IDLE);
         self.legacy
             .pending
@@ -422,6 +433,7 @@ pub async fn run(c: &Config, codec: Codec) -> io::Result<()> {
         });
     }
     let mut state = Server {
+        fragments: crate::fragment::Reassembly::default(),
         sessions: HashMap::new(),
         legacy: LegacyPeers::new(),
         mtu: c.mtu,

@@ -1,6 +1,7 @@
 mod client;
 mod config;
 mod firewall;
+mod fragment;
 mod legacy;
 mod link;
 mod logging;

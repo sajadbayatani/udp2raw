@@ -69,7 +69,7 @@ impl Path {
                     ),
                     &data,
                 )?,
-                Kind::Hello | Kind::Welcome => {
+                Kind::Hello | Kind::Welcome | Kind::Fragment => {
                     return Err(io::Error::other("invalid legacy handshake stage"))
                 }
             };
@@ -78,12 +78,32 @@ impl Path {
                 .send(&mut self.route, Segment::Data, &packet)
                 .await;
         }
-        self.serial += 1;
+        if let Some(width) = codec
+            .fragment_size
+            .filter(|&n| kind == Kind::Data && data.len() > n)
+        {
+            for (index, chunk) in data.chunks(width).enumerate() {
+                let part = crate::fragment::encode(data.len(), width, index, chunk);
+                self.send_frame(codec, Kind::Fragment, flow, part).await?;
+            }
+            return Ok(());
+        }
         let data = if matches!(kind, Kind::Ping | Kind::Pong) {
             vec![0; codec.heartbeat_len]
         } else {
             data
         };
+        self.send_frame(codec, kind, flow, data).await
+    }
+
+    async fn send_frame(
+        &mut self,
+        codec: &Codec,
+        kind: Kind,
+        flow: u64,
+        data: Vec<u8>,
+    ) -> io::Result<()> {
+        self.serial += 1;
         let f = Frame {
             kind,
             session: self.session,

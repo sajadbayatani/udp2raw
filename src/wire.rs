@@ -38,6 +38,7 @@ pub enum Kind {
     Ping,
     Pong,
     Data,
+    Fragment,
 }
 
 pub struct Frame {
@@ -59,6 +60,7 @@ pub struct Codec {
     suite: Suite,
     pub replay: bool,
     pub heartbeat_len: usize,
+    pub fragment_size: Option<usize>,
     gro: bool,
     server: bool,
 }
@@ -78,6 +80,7 @@ impl Codec {
         };
         Self {
             suite,
+            fragment_size: c.fragment_size,
             server: c.server,
             replay: !c.disable_anti_replay,
             heartbeat_len: if c.hb_mode == 1 { c.hb_len } else { 0 },
@@ -173,6 +176,7 @@ impl Codec {
             3 => Kind::Ping,
             4 => Kind::Pong,
             5 => Kind::Data,
+            6 => Kind::Fragment,
             _ => return None,
         };
         if (matches!(kind, Kind::Hello | Kind::Welcome) && p.len() != 57)
@@ -240,6 +244,7 @@ mod tests {
             suite: Suite::Modern(XChaCha20Poly1305::new((&[1; 32]).into())),
             replay: true,
             heartbeat_len: 0,
+            fragment_size: None,
             gro: false,
             server: false,
         };
@@ -247,6 +252,7 @@ mod tests {
             suite: Suite::Modern(XChaCha20Poly1305::new((&[1; 32]).into())),
             replay: true,
             heartbeat_len: 0,
+            fragment_size: None,
             gro: false,
             server: true,
         };

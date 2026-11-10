@@ -65,6 +65,31 @@ and the default warning threshold of 1375, a 1382-byte payload can still
 produce a warning. To have the application send smaller packets, adjust
 the packet size or inner tunnel MTU in the application feeding udp2raw.
 
+### Carry WireGuard without changing its MTU
+
+If WireGuard must keep an interface MTU of 1420, upgrade both udp2raw
+endpoints to v1.4.0 or later. In modern mode, add these options to **both**
+udp2raw commands or put these two lines in each udp2raw service config:
+
+```text
+--mtu 1600
+--fragment-size 1000
+```
+
+Replace an existing `--mtu 1420` setting. WireGuard adds its own headers
+and authentication tag before udp2raw receives the UDP payload. The 1600-byte
+limit admits those datagrams. udp2raw sends up to 1000 application bytes per
+authenticated fragment and reassembles the complete datagram before handing
+it to the local application. A full fragment in this example occupies
+1155 bytes on IPv4 FakeTCP with default framing. Smaller datagrams still
+use one ordinary frame.
+
+Each sender chooses its chunk size (512–4096 bytes). Choose a smaller value
+for paths with a lower MTU. The receiver enforces its `--mtu` limit on the
+original size. Missing fragments cause loss of that UDP datagram. Control
+packets use their existing framing. Fragmentation is off by default and
+requires modern peers with fragment support.
+
 ### Worker threads and CPU affinity
 
 Since v1.2.0, `--threads N` sets the number of OS worker threads per process

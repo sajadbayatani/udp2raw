@@ -85,6 +85,7 @@ pub const HELP: &str = "udp2raw — multithreaded Rust UDP tunnel
   --max-rst-to-show N            Limit reset messages (-1: unlimited)
   --max-rst-allowed N            Reject a path after N resets (-1: unlimited)
   --mtu N                        Max UDP application payload in either direction (1..60000)
+  --fragment-size N              Split modern data into chunks of N payload bytes (512..4096)
   --mtu-warn N                   Warn at N UDP payload bytes (default 1375)
   -a, --auto-rule                Install tunnel firewall rules until normal exit
   -g, --gen-rule                 Print firewall rules and exit
@@ -126,6 +127,7 @@ pub struct Config {
     pub hb_mode: u8,
     pub hb_len: usize,
     pub mtu: usize,
+    pub fragment_size: Option<usize>,
     pub mtu_warn: usize,
     pub fix_gro: bool,
     pub disable_anti_replay: bool,
@@ -224,6 +226,7 @@ impl Config {
             hb_len: 0,
             mtu: crate::wire::MAX_DATA,
             mtu_warn: 1375,
+            fragment_size: None,
             fix_gro: false,
             disable_anti_replay: false,
             source_ip: None,
@@ -336,6 +339,14 @@ impl Config {
                 "--hb-mode" => c.hb_mode = range(&value()?, opt, 0, 1)?,
                 "--hb-len" => c.hb_len = range(&value()?, opt, 0, 1500)?,
                 "--mtu" => c.mtu = range(&value()?, opt, 1, crate::wire::MAX_DATA)?,
+                "--fragment-size" => {
+                    c.fragment_size = Some(range(
+                        &value()?,
+                        opt,
+                        crate::fragment::MIN_CHUNK,
+                        crate::fragment::MAX_CHUNK,
+                    )?)
+                }
                 "--mtu-warn" => c.mtu_warn = range(&value()?, opt, 1, usize::MAX)?,
                 "--source-ip" => {
                     c.source_ip = Some(value()?.parse().map_err(|_| "invalid --source-ip")?)
@@ -470,6 +481,9 @@ impl Config {
                 return Err("legacy cipher/auth options require --wire legacy".into());
             }
             c.legacy = true;
+        }
+        if c.legacy && c.fragment_size.is_some() {
+            return Err("--fragment-size requires modern wire format".into());
         }
         c.debug = seen.contains("--debug");
         if c.debug && !seen.contains("--log-level") {

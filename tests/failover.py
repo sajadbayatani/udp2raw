@@ -124,12 +124,15 @@ def check_payload_limit(server_mtu, client_mtu):
 def main():
     check_payload_limit(server_mtu=1382, client_mtu=1400)
     check_payload_limit(server_mtu=1400, client_mtu=512)
+    # Use different sender chunk sizes; the legacy format has no fragment frames.
+    server_frag = [] if WIRE_ARGS else ["--fragment-size", "1000"]
+    client_frag = [] if WIRE_ARGS else ["--fragment-size", "900"]
     with contextlib.ExitStack() as stack:
         upstream = stack.enter_context(udp())
         threading.Thread(target=echo, args=(upstream,), daemon=True).start()
         server = Tunnel(stack, "-s", "-l", SERVER, "-r",
                         f"127.0.0.1:{upstream.getsockname()[1]}", "--heartbeat-ms", "100",
-                        "--threads", "8", "--mtu", "1382")
+                        "--threads", "8", "--mtu", "1382", *server_frag)
         server.expect("via icmp")
         server.expect_workers(8)
         stack.enter_context(blocked("-p", "tcp", "--tcp-flags", "RST", "RST",
@@ -141,7 +144,7 @@ def main():
             return Tunnel(stack, "-c", "-l", f"127.0.0.1:{port}", "-r", SERVER,
                           "--heartbeat-ms", "100", "--timeout-ms", "600", *extra, key=key)
 
-        primary = client(dest[1], "--threads", "1", "--mtu", "1382", "--debug")
+        primary = client(dest[1], "--threads", "1", "--mtu", "1382", "--debug", *client_frag)
         primary.expect("connected via faketcp")
         primary.expect_workers(1)
         a, b = stack.enter_context(udp()), stack.enter_context(udp())
