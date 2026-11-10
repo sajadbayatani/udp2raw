@@ -37,23 +37,130 @@ a valid reply. Local errors may trigger an earlier switch. After the last
 carrier the client retries the first. It stays on a healthy carrier.
 Datagrams in flight may be lost. Idle flows expire after five minutes.
 
-Set `--threads N` on either endpoint to choose how many OS worker threads
-run tunnel tasks. Each process defaults to 4 and accepts 1 through 256.
-For example, add `--threads 8` to the server command and `--threads 2` to
-the client command. The same option works in a config file. Restart the
-process to apply a new count.
-
-Independent tasks can run in parallel when the OS schedules their threads
-on different logical CPUs. To keep all threads on one logical CPU on Linux,
-prefix the command with `taskset -c 0` (choose a CPU allowed for the process).
-The workers then share that CPU's execution time. The main thread and any
-helper threads are additional to the configured worker count.
-
 For a UDP-only tunnel use `--raw-mode udp` on both ends. The modern Linux UDP
 backend can run as a regular user. Legacy UDP constructs its own UDP headers
 and checksums and requires raw socket access. For IPv6 use bracketed endpoints such as
 `-l '[::]:4096'`. `--dns-resolve` enables hostnames. The UDP application and
 outer carrier can use different address families.
+
+### Worker threads and CPU affinity
+
+Since v1.2.0, `--threads N` sets the number of OS worker threads per process
+(1–256, default 4). The server and client can use different values. Set it on
+the command line or on its own line in the config file, then restart the
+process to apply it. The main thread and optional helper threads are additional.
+
+```sh
+# Server with 8 workers
+./udp2raw -s -l 0.0.0.0:4096 -r 127.0.0.1:7777 --threads 8
+
+# Client with 2 workers; substitute the server's IP
+./udp2raw -c -l 127.0.0.1:3333 -r 192.0.2.1:4096 --threads 2
+```
+
+Independent tunnel tasks can run in parallel on different logical CPUs.
+To run multiple threads on one logical CPU, check the allowed CPUs with
+`taskset -pc $$` and prefix the command with e.g. `taskset -c 0` if CPU 0
+is allowed. The workers then take turns on that CPU. For a running process,
+`ps -T -p PID -o tid,psr,comm` shows each thread ID, the logical CPU it last
+ran on and its name. Replace `PID` with the process ID.
+
+## Run as a Linux systemd service
+
+On each host, install the verified release binary from the steps above and
+create a root-only directory for the config and shared key.
+
+```sh
+sudo install -m 0755 ./udp2raw /usr/local/bin/udp2raw
+sudo install -d -m 0700 /etc/udp2raw
+```
+
+Generate one key with `openssl rand -hex 32` and transfer it securely to
+the other host. Replace `REPLACE_WITH_SHARED_KEY` in both configs with that
+same value. Install your distribution's `iptables` package on both hosts.
+The `-a` option installs tunnel rules at startup and removes them on normal shutdown. Allow
+inbound TCP/UDP port 4096 and ICMP echo on the server's network firewall.
+
+On the **server**, use `sudoedit /etc/udp2raw/server.conf` and enter the
+following. Set `-r` to the UDP application that should receive the traffic.
+
+```text
+-s
+-l 0.0.0.0:4096
+-r 127.0.0.1:7777
+-k REPLACE_WITH_SHARED_KEY
+--protocols faketcp,udp,icmp
+--threads 8
+-a
+--wait-lock
+```
+
+On the **client**, use `sudoedit /etc/udp2raw/client.conf` and enter the
+following. Replace `192.0.2.1` with the server's IP. Local applications
+send UDP traffic to `127.0.0.1:3333`.
+
+```text
+-c
+-l 127.0.0.1:3333
+-r 192.0.2.1:4096
+-k REPLACE_WITH_SHARED_KEY
+--protocols faketcp,udp,icmp
+--threads 2
+-a
+--wait-lock
+```
+
+On **both hosts**, use `sudoedit /etc/systemd/system/udp2raw@.service` to
+create this template. The instance name selects `server.conf` or
+`client.conf`. The service runs as root with the capabilities needed for
+raw sockets and firewall rules.
+
+```ini
+[Unit]
+Description=udp2raw tunnel (%i)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/udp2raw --conf-file /etc/udp2raw/%i.conf
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
+NoNewPrivileges=yes
+Restart=on-failure
+RestartSec=3s
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Run these commands on each host. Set `unit=udp2raw@server.service` on the
+server and `unit=udp2raw@client.service` on the client.
+
+```sh
+unit=udp2raw@server.service   # use udp2raw@client.service on the client
+sudo systemctl daemon-reload
+sudo systemctl enable --now "$unit"
+systemctl status "$unit" --no-pager
+sudo journalctl -u "$unit" -f
+```
+
+The server logs one `listening on` line per carrier. The client's
+`connected via` line identifies the active carrier. Press Ctrl-C to exit
+the log viewer. To inspect the service's threads, run
+`ps -T -p "$(systemctl show -p MainPID --value "$unit")" -o tid,psr,comm`.
+
+To pin a service to one logical CPU, run `sudo systemctl edit "$unit"` and
+add the following drop-in, substituting a CPU allowed on that host.
+
+```ini
+[Service]
+CPUAffinity=0
+```
+
+Run `sudo systemctl restart "$unit"` after changing the drop-in, config or
+thread count. After editing the unit template itself, run
+`sudo systemctl daemon-reload` before restarting. To stop the service and
+disable startup at boot, run `sudo systemctl disable --now "$unit"`.
 
 ## Wire formats and upgrades
 
