@@ -84,7 +84,8 @@ pub const HELP: &str = "udp2raw — multithreaded Rust UDP tunnel
   --random-drop N                Drop N of 10000 outgoing packets on average
   --max-rst-to-show N            Limit reset messages (-1: unlimited)
   --max-rst-allowed N            Reject a path after N resets (-1: unlimited)
-  --mtu-warn N                   Warn on UDP datagrams larger than N bytes
+  --mtu N                        Max UDP application payload in either direction (1..60000)
+  --mtu-warn N                   Warn at N UDP payload bytes (default 1375)
   -a, --auto-rule                Install tunnel firewall rules until normal exit
   -g, --gen-rule                 Print firewall rules and exit
   --gen-add                      Install persistent rules and exit
@@ -124,6 +125,7 @@ pub struct Config {
     pub auth_mode: Auth,
     pub hb_mode: u8,
     pub hb_len: usize,
+    pub mtu: usize,
     pub mtu_warn: usize,
     pub fix_gro: bool,
     pub disable_anti_replay: bool,
@@ -220,6 +222,7 @@ impl Config {
             auth_mode: Auth::default(),
             hb_mode: 1,
             hb_len: 0,
+            mtu: crate::wire::MAX_DATA,
             mtu_warn: 1375,
             fix_gro: false,
             disable_anti_replay: false,
@@ -332,6 +335,7 @@ impl Config {
                 }
                 "--hb-mode" => c.hb_mode = range(&value()?, opt, 0, 1)?,
                 "--hb-len" => c.hb_len = range(&value()?, opt, 0, 1500)?,
+                "--mtu" => c.mtu = range(&value()?, opt, 1, crate::wire::MAX_DATA)?,
                 "--mtu-warn" => c.mtu_warn = range(&value()?, opt, 1, usize::MAX)?,
                 "--source-ip" => {
                     c.source_ip = Some(value()?.parse().map_err(|_| "invalid --source-ip")?)

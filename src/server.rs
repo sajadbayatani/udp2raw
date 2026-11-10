@@ -4,7 +4,7 @@ use crate::{
     legacy::{self, Link, Payload},
     path::Path,
     transport::{Carrier, Route, Segment},
-    wire::{random, Codec, Frame, Kind, SessionId, MAX_DATA},
+    wire::{payload_fits, random, Codec, Frame, Kind, SessionId},
 };
 use std::{
     collections::{hash_map::Entry, HashMap},
@@ -115,6 +115,7 @@ struct Server {
     tx: mpsc::Sender<Event>,
     upstream: SocketAddr,
     legacy: LegacyPeers,
+    mtu: usize,
     mtu_warn: usize,
     port: u16,
     codec: Arc<Codec>,
@@ -315,6 +316,9 @@ impl Server {
         }
     }
     async fn forward(&mut self, key: FlowKey, data: &[u8]) -> io::Result<()> {
+        if !payload_fits(data.len(), self.mtu) {
+            return Ok(());
+        }
         crate::log!(
             6,
             "forwarding {} bytes on conversation {}",
@@ -335,11 +339,12 @@ impl Server {
                 socket.connect(self.upstream).await?;
                 let rx = socket.clone();
                 let tx = self.tx.clone();
+                let mtu = self.mtu;
                 let reader = tokio::spawn(async move {
                     let mut buf = vec![0; 65535];
                     loop {
                         match rx.recv(&mut buf).await {
-                            Ok(n) if n <= MAX_DATA => {
+                            Ok(n) if payload_fits(n, mtu) => {
                                 if tx.send(Event::Reply(key, buf[..n].to_vec())).await.is_err() {
                                     break;
                                 }
@@ -419,6 +424,7 @@ pub async fn run(c: &Config, codec: Codec) -> io::Result<()> {
     let mut state = Server {
         sessions: HashMap::new(),
         legacy: LegacyPeers::new(),
+        mtu: c.mtu,
         mtu_warn: c.mtu_warn,
         flows: HashMap::new(),
         tx,

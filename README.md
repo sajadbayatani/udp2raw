@@ -43,6 +43,28 @@ and checksums and requires raw socket access. For IPv6 use bracketed endpoints s
 `-l '[::]:4096'`. `--dns-resolve` enables hostnames. The UDP application and
 outer carrier can use different address families.
 
+### Limit UDP payload size
+
+Since v1.3.0, `--mtu N` sets the maximum number of **application UDP payload
+bytes** an endpoint will forward in either direction. For example, add
+`--mtu 1382` to the client and server commands, or put it on its own line in
+`client.conf` and `server.conf` and restart the services. A 1382-byte
+datagram can pass the limit. A 1383-byte datagram is dropped whole. The
+drop does not trigger failover. The same limit applies after a carrier
+switch. Use `--debug` to see drops.
+
+Each endpoint enforces its own setting. With 1300 on the server and 1382 on
+the client, 1300 is the effective payload ceiling in both directions.
+The accepted range is 1–60000, with a default ceiling of 60000 bytes.
+The wire format and path MTU may impose smaller limits. IP, carrier and
+encryption headers add bytes on the wire. Handshakes and heartbeat padding
+are outside this application payload limit.
+
+`--mtu-warn` controls logging separately. For example, with `--mtu 1382`
+and the default warning threshold of 1375, a 1382-byte payload can still
+produce a warning. To have the application send smaller packets, adjust
+the packet size or inner tunnel MTU in the application feeding udp2raw.
+
 ### Worker threads and CPU affinity
 
 Since v1.2.0, `--threads N` sets the number of OS worker threads per process

@@ -91,13 +91,45 @@ def roundtrip(sock, dest, data):
     return reply[:2]
 
 
+def check_payload_limit(server_mtu, client_mtu):
+    limit = min(client_mtu, server_mtu)
+    dest = ("127.0.0.1", 33333)
+    with contextlib.ExitStack() as stack:
+        backend = stack.enter_context(udp())
+        app = stack.enter_context(udp())
+        for sock in (app, backend):
+            sock.settimeout(2)
+        server = Tunnel(stack, "-s", "-l", SERVER, "-r", f"127.0.0.1:{backend.getsockname()[1]}",
+                        "--raw-mode", "udp", "--mtu", str(server_mtu), "--debug")
+        server.expect("via udp")
+        client = Tunnel(stack, "-c", "-l", "127.0.0.1:33333", "-r", SERVER,
+                        "--raw-mode", "udp", "--mtu", str(client_mtu), "--debug")
+        client.expect("connected via udp")
+
+        # Establish the flow at the exact limit, then exercise each direction independently.
+        boundary = os.urandom(limit)
+        app.sendto(boundary, dest)
+        data, peer = backend.recvfrom(65535)
+        assert data == boundary
+        backend.sendto(boundary, peer)
+        assert app.recv(65535) == boundary
+        stricter = server if server_mtu < client_mtu else client
+        for sender, target, receiver in [(app, dest, backend), (backend, peer, app)]:
+            sender.sendto(os.urandom(limit + 1), target)
+            stricter.expect(f"dropping {limit + 1}-byte UDP payload")
+            sender.sendto(b"", target)
+            assert receiver.recv(65535) == b""
+
+
 def main():
+    check_payload_limit(server_mtu=1382, client_mtu=1400)
+    check_payload_limit(server_mtu=1400, client_mtu=512)
     with contextlib.ExitStack() as stack:
         upstream = stack.enter_context(udp())
         threading.Thread(target=echo, args=(upstream,), daemon=True).start()
         server = Tunnel(stack, "-s", "-l", SERVER, "-r",
                         f"127.0.0.1:{upstream.getsockname()[1]}", "--heartbeat-ms", "100",
-                        "--threads", "8")
+                        "--threads", "8", "--mtu", "1382")
         server.expect("via icmp")
         server.expect_workers(8)
         stack.enter_context(blocked("-p", "tcp", "--tcp-flags", "RST", "RST",
@@ -109,7 +141,7 @@ def main():
             return Tunnel(stack, "-c", "-l", f"127.0.0.1:{port}", "-r", SERVER,
                           "--heartbeat-ms", "100", "--timeout-ms", "600", *extra, key=key)
 
-        primary = client(dest[1], "--threads", "1")
+        primary = client(dest[1], "--threads", "1", "--mtu", "1382", "--debug")
         primary.expect("connected via faketcp")
         primary.expect_workers(1)
         a, b = stack.enter_context(udp()), stack.enter_context(udp())
@@ -145,7 +177,10 @@ def main():
             assert roundtrip(a, ("127.0.0.1", 33337), b"cold start") != first
             with blocked("-d", "127.0.0.2", "-p", "udp", "--dport", "34096"):
                 primary.expect("connected via icmp")
-                assert roundtrip(a, dest, os.urandom(1025)) == first
+                a.sendto(os.urandom(1383), dest)
+                primary.expect("dropping 1383-byte UDP payload")
+                # The test echo service prepends two port bytes on the return trip.
+                assert roundtrip(a, dest, os.urandom(1380)) == first
                 assert roundtrip(b, dest, b"second flow") == second
                 with blocked("-d", "127.0.0.2", "-p", "icmp", "--icmp-type", "echo-request"):
                     primary.expect("icmp timed out")

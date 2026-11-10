@@ -9,6 +9,18 @@ use chacha20poly1305::{
 use std::io;
 
 pub const MAX_DATA: usize = 60_000;
+
+pub fn payload_fits(len: usize, mtu: usize) -> bool {
+    if len > mtu {
+        crate::log!(
+            5,
+            "dropping {len}-byte UDP payload above tunnel limit {mtu}"
+        );
+        return false;
+    }
+    true
+}
+
 pub type SessionId = [u8; 16];
 pub type Cookie = [u8; 16];
 

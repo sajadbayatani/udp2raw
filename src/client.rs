@@ -3,7 +3,7 @@ use crate::{
     legacy::{self, Link, Packet, Payload},
     path::Path,
     transport::{Carrier, Incoming, Segment},
-    wire::{random, Codec, Kind, SessionId, MAX_DATA},
+    wire::{payload_fits, random, Codec, Kind, SessionId},
 };
 use std::{collections::HashMap, io, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{
@@ -56,6 +56,7 @@ impl Flows {
 }
 
 struct Local {
+    mtu: usize,
     socket: Arc<UdpSocket>,
     reader: tokio::task::JoinHandle<()>,
     packets: mpsc::Receiver<(SocketAddr, Vec<u8>)>,
@@ -70,12 +71,15 @@ impl Drop for Local {
 
 impl Local {
     async fn deliver(&mut self, flow: u64, data: &[u8]) {
+        if !payload_fits(data.len(), self.mtu) {
+            return;
+        }
         if let Some((addr, last)) = self.flows.by_id.get_mut(&flow) {
             *last = Instant::now();
             let _ = self.socket.send_to(data, *addr).await;
         }
     }
-    async fn bind(addr: SocketAddr, mtu_warn: usize) -> io::Result<Self> {
+    async fn bind(addr: SocketAddr, mtu: usize, mtu_warn: usize) -> io::Result<Self> {
         let socket = Arc::new(UdpSocket::bind(addr).await?);
         let reader = socket.clone();
         let (tx, packets) = mpsc::channel(256);
@@ -89,18 +93,22 @@ impl Local {
                         break;
                     }
                 };
+                if !payload_fits(len, mtu) {
+                    continue;
+                }
                 if len >= mtu_warn {
                     crate::log!(
                         3,
                         "UDP datagram of {len} bytes reaches MTU warning threshold {mtu_warn}"
                     );
                 }
-                if len <= MAX_DATA && tx.send((source, buffer[..len].to_vec())).await.is_err() {
+                if tx.send((source, buffer[..len].to_vec())).await.is_err() {
                     break;
                 }
             }
         });
         Ok(Self {
+            mtu,
             socket,
             reader: task,
             packets,
@@ -110,7 +118,7 @@ impl Local {
 }
 
 pub async fn run(c: &Config, codec: Codec) -> io::Result<()> {
-    let mut local = Local::bind(c.local, c.mtu_warn).await?;
+    let mut local = Local::bind(c.local, c.mtu, c.mtu_warn).await?;
     let session = if c.legacy {
         legacy::session_id(legacy::id())
     } else {
