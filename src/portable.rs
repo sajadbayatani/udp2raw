@@ -24,7 +24,7 @@ type Handle = Arc<Mutex<Capture<Active>>>;
 fn cap_err(e: pcap::Error) -> io::Error {
     io::Error::other(e)
 }
-fn wildcard(peer: SocketAddr) -> IpAddr {
+pub fn wildcard(peer: IpAddr) -> IpAddr {
     if peer.is_ipv4() {
         Ipv4Addr::UNSPECIFIED.into()
     } else {
@@ -238,6 +238,11 @@ impl Drop for Carrier {
     }
 }
 
+pub(crate) fn buffers(socket: &Socket, c: &Config) -> io::Result<()> {
+    socket.set_recv_buffer_size(c.sock_buf)?;
+    socket.set_send_buffer_size(c.sock_buf)
+}
+
 impl Carrier {
     pub async fn bind(mode: Mode, c: &Config) -> io::Result<Arc<Self>> {
         if c.server {
@@ -245,7 +250,7 @@ impl Carrier {
         }
         let peer = c.remote;
         let probe = UdpSocket::bind(SocketAddr::new(
-            c.source_ip.unwrap_or_else(|| wildcard(peer)),
+            c.source_ip.unwrap_or_else(|| wildcard(peer.ip())),
             0,
         ))?;
         probe.connect(peer)?;
@@ -259,8 +264,7 @@ impl Carrier {
             },
             None,
         )?;
-        socket.set_recv_buffer_size(c.sock_buf)?;
-        socket.set_send_buffer_size(c.sock_buf)?;
+        buffers(&socket, c)?;
         socket.bind(&SocketAddr::new(src.ip(), c.source_port.unwrap_or(0)).into())?;
         let port = socket.local_addr()?.as_socket().unwrap().port();
         let setup = Setup {

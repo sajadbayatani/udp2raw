@@ -57,9 +57,9 @@ def check_icmp():
             backend.sendto(data, peer)
         thread = threading.Thread(target=echo)
         with process("-s", "-a", "-l127.0.0.2:35789", f"-r127.0.0.1:{backend.getsockname()[1]}",
-                     "--raw-mode", "icmp"), \
+                     "--raw-mode", "icmp", "--sock-buf", "64"), \
              process("-c", "-l127.0.0.1:35788", "-r127.0.0.2:35789", "--raw-mode", "icmp",
-                     "--heartbeat-ms", "200", "--timeout-ms", "1200"):
+                     "--heartbeat-ms", "200", "--timeout-ms", "1200", "--sock-buf", "64"):
             wait_for(lambda: any("--mark" in line for line in managed()))
             thread.start()
             app.settimeout(.25)
@@ -74,6 +74,14 @@ def check_icmp():
             else:
                 raise AssertionError("ICMP userspace replies did not reach the client")
             thread.join(5)
+            # Match Linux's effective limits even when the namespace clamps them.
+            for opt in (socket.SO_RCVBUF, socket.SO_SNDBUF):
+                app.setsockopt(socket.SOL_SOCKET, opt, 64 * 1024)
+            rb = app.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
+            tb = app.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF)
+            for field, port in [("sport", 35788), ("dport", backend.getsockname()[1])]:
+                limits = run("ss", "-Huanm", field, "=", f":{port}")
+                assert f",rb{rb}," in limits and f",tb{tb}," in limits, limits
             counters = run("iptables", "-n", "-v", "-x", "-L", "OUTPUT").splitlines()
             assert any("u2r_t" in line and int(line.split()[0]) > 0 for line in counters), counters
 

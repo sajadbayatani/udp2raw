@@ -109,20 +109,17 @@ impl LegacyPeers {
     }
 }
 
-struct Server {
+struct Server<'a> {
+    config: &'a Config,
     fragments: crate::fragment::Reassembly,
     sessions: HashMap<SessionId, Session>,
     flows: HashMap<FlowKey, Flow>,
     tx: mpsc::Sender<Event>,
-    upstream: SocketAddr,
     legacy: LegacyPeers,
-    mtu: usize,
-    mtu_warn: usize,
-    port: u16,
     codec: Arc<Codec>,
 }
 
-impl Server {
+impl Server<'_> {
     async fn legacy_packet(
         &mut self,
         carrier: Arc<Carrier>,
@@ -192,7 +189,7 @@ impl Server {
                 } else if self.sessions.len() >= MAX_SESSIONS {
                     return Ok(());
                 }
-                let mut path = Path::new(carrier, route, sid, generation, self.port);
+                let mut path = Path::new(carrier, route, sid, generation, self.config.local.port());
                 path.legacy = Some(Link::new(receiver, sender));
                 path.ready = true;
                 if let Some(old) = self.sessions.insert(
@@ -267,13 +264,19 @@ impl Server {
                 Entry::Occupied(e) => e.into_mut(),
                 Entry::Vacant(_) if full => return Ok(()),
                 Entry::Vacant(e) => e.insert(Session {
-                    path: Path::new(carrier.clone(), route, f.session, f.epoch, self.port),
+                    path: Path::new(
+                        carrier.clone(),
+                        route,
+                        f.session,
+                        f.epoch,
+                        self.config.local.port(),
+                    ),
                     last_seen: Instant::now(),
                 }),
             };
             let p = &mut s.path;
             if f.epoch > p.epoch {
-                *p = Path::new(carrier, route, f.session, f.epoch, self.port);
+                *p = Path::new(carrier, route, f.session, f.epoch, self.config.local.port());
             } else if f.epoch != p.epoch
                 || p.carrier.mode != carrier.mode
                 || route.peer != p.route.peer
@@ -312,7 +315,7 @@ impl Server {
             }
             Kind::Data | Kind::Fragment if p.ready && f.flow != 0 => {
                 let key = (f.session, f.flow);
-                let Some(data) = self.fragments.payload(f, self.mtu) else {
+                let Some(data) = self.fragments.payload(f, self.config.mtu) else {
                     return Ok(());
                 };
                 self.forward(key, &data).await
@@ -321,7 +324,7 @@ impl Server {
         }
     }
     async fn forward(&mut self, key: FlowKey, data: &[u8]) -> io::Result<()> {
-        if !payload_fits(data.len(), self.mtu) {
+        if !payload_fits(data.len(), self.config.mtu) {
             return Ok(());
         }
         crate::log!(
@@ -335,16 +338,12 @@ impl Server {
             Entry::Occupied(e) => e.into_mut(),
             Entry::Vacant(_) if full => return Ok(()),
             Entry::Vacant(e) => {
-                let bind = if self.upstream.is_ipv4() {
-                    "0.0.0.0:0"
-                } else {
-                    "[::]:0"
-                };
-                let socket = Arc::new(UdpSocket::bind(bind).await?);
-                socket.connect(self.upstream).await?;
+                let bind = SocketAddr::new(crate::transport::wildcard(self.config.remote.ip()), 0);
+                let socket = Arc::new(self.config.bind_application_udp(bind)?);
+                socket.connect(self.config.remote).await?;
                 let rx = socket.clone();
                 let tx = self.tx.clone();
-                let mtu = self.mtu;
+                let mtu = self.config.mtu;
                 let reader = tokio::spawn(async move {
                     let mut buf = vec![0; 65535];
                     loop {
@@ -378,7 +377,7 @@ impl Server {
             return Ok(());
         };
         flow.last_seen = Instant::now();
-        if data.len() >= self.mtu_warn
+        if data.len() >= self.config.mtu_warn
             && self
                 .codec
                 .fragment_size
@@ -388,7 +387,7 @@ impl Server {
                 3,
                 "upstream UDP datagram of {} bytes reaches MTU warning threshold {}",
                 data.len(),
-                self.mtu_warn
+                self.config.mtu_warn
             );
         }
         if s.path.ready {
@@ -433,15 +432,12 @@ pub async fn run(c: &Config, codec: Codec) -> io::Result<()> {
         });
     }
     let mut state = Server {
+        config: c,
         fragments: crate::fragment::Reassembly::default(),
         sessions: HashMap::new(),
         legacy: LegacyPeers::new(),
-        mtu: c.mtu,
-        mtu_warn: c.mtu_warn,
         flows: HashMap::new(),
         tx,
-        upstream: c.remote,
-        port: c.local.port(),
         codec,
     };
     let mut cleanup = time::interval(Duration::from_secs(10));

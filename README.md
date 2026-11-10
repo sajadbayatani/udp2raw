@@ -90,6 +90,24 @@ original size. Missing fragments cause loss of that UDP datagram. Control
 packets use their existing framing. Fragmentation is off by default and
 requires modern peers with fragment support.
 
+For an outer path verified to carry 1500-byte IP packets in both directions,
+try `--mtu 1600 --fragment-size 1320` on both endpoints. Datagrams from
+1001 through 1320 bytes then fit in a single frame. A 1382-byte datagram
+still takes two. At this setting a full fragment occupies 1451 bytes on
+IPv4 ICMP and 1495 bytes on IPv6 FakeTCP (add two bytes with
+`--fix-gro`). Account for every carrier in the failover list. If the path
+MTU is smaller or uncertain, start with 1000 and compare goodput in each
+direction before increasing it.
+
+Since v1.4.1, `--sock-buf N` (KiB) also sets the send and receive buffers
+on the client's local UDP listener and each server-side upstream UDP socket.
+Linux limits ordinary buffer requests to `net.core.rmem_max` and
+`net.core.wmem_max`. To inspect UDP socket buffers and drops during a
+transfer, run `ss -u -a -n -m -p` on the tunnel host and locate the
+udp2raw socket. The `rb`, `tb` and `d` fields show the receive limit,
+send limit and socket drops. A growing drop count during a burst is a
+reason to investigate the receive buffer.
+
 ### Worker threads and CPU affinity
 
 Since v1.2.0, `--threads N` sets the number of OS worker threads per process

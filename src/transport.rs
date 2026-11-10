@@ -86,7 +86,7 @@ fn configure(s: &Socket, c: &Config, addr: SocketAddr) -> io::Result<()> {
     Ok(())
 }
 
-fn buffers(s: &Socket, c: &Config) -> io::Result<()> {
+pub(crate) fn buffers(s: &Socket, c: &Config) -> io::Result<()> {
     if c.force_sock_buf {
         linux_io::set_int(
             s.as_raw_fd(),

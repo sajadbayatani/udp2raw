@@ -80,7 +80,7 @@ impl Local {
         }
     }
     async fn bind(c: &Config) -> io::Result<Self> {
-        let socket = Arc::new(UdpSocket::bind(c.local).await?);
+        let socket = Arc::new(c.bind_application_udp(c.local)?);
         let (mtu, mtu_warn, fragment_size) = (c.mtu, c.mtu_warn, c.fragment_size);
         let reader = socket.clone();
         let (tx, packets) = mpsc::channel(256);

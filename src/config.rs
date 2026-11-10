@@ -204,6 +204,16 @@ fn file_args(path: &str) -> Result<Vec<String>, String> {
 }
 
 impl Config {
+    pub fn bind_application_udp(&self, addr: SocketAddr) -> std::io::Result<tokio::net::UdpSocket> {
+        use socket2::{Domain, Protocol, Socket, Type};
+
+        let socket = Socket::new(Domain::for_address(addr), Type::DGRAM, Some(Protocol::UDP))?;
+        crate::transport::buffers(&socket, self)?;
+        socket.set_nonblocking(true)?;
+        socket.bind(&addr.into())?;
+        tokio::net::UdpSocket::from_std(socket.into())
+    }
+
     pub fn parse() -> Result<Self, String> {
         Self::from_args(env::args().skip(1).collect(), env::var("UDP2RAW_KEY").ok())
     }
